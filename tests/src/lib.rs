@@ -154,6 +154,99 @@ mod tests {
             });
         });
     }
+
+    #[pg_test]
+    fn test_multi_ops_in_subtransaction_returning_data() {
+        use checked::*;
+        use subtxn::*;
+
+        let spi_result: Result<i32, CaughtError> = Spi::connect(|c| {
+            //Create subtransaction
+            let sub_txn_result: Result<i32, CaughtError> = c.sub_transaction(|xact| {
+                // Operation 1, with early return if it fails
+                let (_, xact) = xact.checked_update("CREATE TABLE a (id int)", None, None)?;
+                // Operation 2, with early return if it fails
+                let (_, xact) = xact.checked_update("INSERT INTO a VALUES (1)", None, None)?;
+                // Operation 3, with early return if it fails
+                let (val, _) =
+                    xact.checked_update("INSERT INTO a VALUES (2) returning id", None, None)?;
+                // Get a value from the query
+                let out_val: i32 = val.first().get_datum::<i32>(1).unwrap();
+                // Return that value from the closure
+                Ok(out_val)
+            });
+
+            // Spi::connect requires a Result<Option<_>, SpiError>
+            // and unwraps the outer result type, panic-ing if it finds an SpiError.
+            // to return our own result, we must wrap it in an Result<Option<T>>
+            Ok(Some(sub_txn_result))
+        })
+        .unwrap();
+
+        assert!(matches!(spi_result, Ok(2)));
+
+        Spi::execute(|c| {
+            let count = c
+                .select("select count(*) from a", None, None)
+                .first()
+                .get_datum::<i32>(1)
+                .unwrap();
+            assert_eq!(count, 2);
+        })
+    }
+
+    #[pg_test]
+    fn test_xxx() {
+        use checked::*;
+        use subtxn::*;
+
+        Spi::execute(|mut c| {
+            c.update("CREATE TABLE abc (v INTEGER)", None, None);
+        });
+
+        let spi_result: Result<i32, String> = Spi::connect(|c| {
+            //Create subtransaction
+            let sub_txn_result: Result<i32, String> = c.sub_transaction(|xact| {
+                // Postgres operation 1 (may fail)
+                let (val, xact) = xact
+                    .checked_update("insert into abc(id) values 1", None, None)
+                    .map_err(|_| "insert 1 failed".to_string())?;
+
+                // Rust operation, may fail
+                let n_inserted = val.first().get_datum::<i32>(1).unwrap();
+                if n_inserted != 1 {
+                    Err("too many rows inserted".to_string()).map_err(|e| {
+                        xact.rollback();
+                        e
+                    })?;
+                }
+
+                // Postgres operation 2
+                // [rustc E0382] [E] use of moved value: `xact`
+                let (val, _) = xact
+                    .checked_update("insert into abc(id) values 2", None, None)
+                    .map_err(|_| "insert 2 failed".to_string())?;
+
+                let return_val: i32 = val.first().get_datum::<i32>(1).unwrap();
+                // Return that value from the closure
+                Ok(return_val)
+            });
+
+            Ok(Some(sub_txn_result))
+        })
+        .unwrap();
+
+        assert!(matches!(spi_result, Ok(2)));
+
+        Spi::execute(|c| {
+            let count = c
+                .select("select count(*) from a", None, None)
+                .first()
+                .get_datum::<i32>(1)
+                .unwrap();
+            assert_eq!(count, 2);
+        })
+    }
 }
 
 #[cfg(test)]
