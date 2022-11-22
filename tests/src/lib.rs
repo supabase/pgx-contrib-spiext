@@ -7,7 +7,6 @@ pgx::pg_module_magic!();
 mod tests {
     use pgx::pg_sys::submodules::panic::CaughtError;
     use pgx::prelude::*;
-    use pgx::SpiClient;
     use pgx_contrib_spiext::*;
 
     #[pg_test]
@@ -15,28 +14,30 @@ mod tests {
         use subtxn::*;
         Spi::execute(|mut c| {
             c.update("CREATE TABLE a (v INTEGER)", None, None);
-            let c = c.sub_transaction(|mut xact| {
-                xact.update("INSERT INTO a VALUES (0)", None, None);
-                assert_eq!(
-                    0,
-                    xact.select("SELECT v FROM a", Some(1), None)
-                        .first()
-                        .get_datum::<i32>(1)
-                        .unwrap()
-                );
-                let xact = xact.sub_transaction(|mut xact| {
-                    xact.update("INSERT INTO a VALUES (1)", None, None);
+            let c = c
+                .sub_transaction(|mut xact| {
+                    xact.update("INSERT INTO a VALUES (0)", None, None);
                     assert_eq!(
-                        2,
-                        xact.select("SELECT COUNT(*) FROM a", Some(1), None)
+                        0,
+                        xact.select("SELECT v FROM a", Some(1), None)
                             .first()
                             .get_datum::<i32>(1)
                             .unwrap()
                     );
+                    let xact = xact.sub_transaction(|mut xact| {
+                        xact.update("INSERT INTO a VALUES (1)", None, None);
+                        assert_eq!(
+                            2,
+                            xact.select("SELECT COUNT(*) FROM a", Some(1), None)
+                                .first()
+                                .get_datum::<i32>(1)
+                                .unwrap()
+                        );
+                        xact.rollback()
+                    });
                     xact.rollback()
-                });
-                xact.rollback()
-            });
+                })
+                .unwrap();
             assert_eq!(
                 0,
                 c.select("SELECT COUNT(*) FROM a", Some(1), None)
@@ -55,24 +56,26 @@ mod tests {
             c.update("CREATE TABLE a (v INTEGER)", None, None);
             let (_, c) = c
                 .sub_transaction(|xact| xact.checked_update("INSERT INTO a VALUES (0)", None, None))
+                .unwrap()
                 .unwrap();
             drop(c);
             // The above transaction will be committed
+        });
 
-            // We use SpiClient here because `c` was consumed. It's not the best way to
-            // handle this, but we needed to simulate dropping the sub-transaction
+        Spi::execute(|c| {
             assert_eq!(
                 1,
-                SpiClient
-                    .select("SELECT COUNT(*) FROM a", Some(1), None)
+                c.select("SELECT COUNT(*) FROM a", Some(1), None)
                     .first()
                     .get_datum::<i32>(1)
                     .unwrap()
             );
-            let c = SpiClient.sub_transaction(|mut xact| {
-                xact.update("INSERT INTO a VALUES (0)", None, None);
-                xact.rollback()
-            });
+            let c = c
+                .sub_transaction(|mut xact| {
+                    xact.update("INSERT INTO a VALUES (0)", None, None);
+                    xact.rollback()
+                })
+                .unwrap();
             // The above transaction will be rolled back (as explicitly requested)
             assert_eq!(
                 1,
@@ -133,7 +136,7 @@ mod tests {
                     result,
                     Err(CaughtError::PostgresError(error)) if error.message() == "syntax error at or near \"SLECT\""
                 ));
-            });
+            }).unwrap();
         });
     }
 
@@ -151,7 +154,7 @@ mod tests {
                     result,
                     Err(CaughtError::PostgresError(error)) if error.message() == "syntax error at or near \"INSER\""
                 ));
-            });
+            }).unwrap();
         });
     }
 }

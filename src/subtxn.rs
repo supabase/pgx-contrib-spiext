@@ -1,4 +1,4 @@
-use pgx::{pg_sys, PgMemoryContexts, SpiClient};
+use pgx::{pg_sys, PgMemoryContexts, SpiClient, SpiSingletonClient};
 use std::fmt::{Debug, Formatter};
 use std::ops::{Deref, DerefMut};
 
@@ -152,31 +152,64 @@ impl<Parent, const COMMIT: bool> DerefMut for SubTransaction<Parent, COMMIT> {
 pub trait SubTransactionExt {
     /// Parent's type
     type T;
+    /// Return type
+    type Return<R>;
 
     /// Consume `self` and return a sub-transaction
-    fn sub_transaction<F: FnOnce(SubTransaction<Self::T>) -> R, R>(self, f: F) -> R
+    fn sub_transaction<F: FnOnce(SubTransaction<Self::T>) -> R, R>(self, f: F) -> Self::Return<R>
     where
         Self: Sized;
 }
 
 impl SubTransactionExt for SpiClient {
-    type T = Box<SpiClient>;
-    fn sub_transaction<F: FnOnce(SubTransaction<Self::T>) -> R, R>(self, f: F) -> R
+    type T = SpiSingletonClient;
+    type Return<R> = Result<R, SpiClient>;
+    fn sub_transaction<F: FnOnce(SubTransaction<Self::T>) -> R, R>(self, f: F) -> Self::Return<R>
     where
         Self: Sized,
     {
-        let sub_xact = SubTransaction::new(Box::new(self));
+        let singleton: SpiSingletonClient = self.try_into()?;
+        let sub_xact = SubTransaction::new(singleton);
+        Ok(f(sub_xact))
+    }
+}
+
+impl SubTransactionExt for SpiSingletonClient {
+    type T = SpiSingletonClient;
+    type Return<R> = R;
+    fn sub_transaction<F: FnOnce(SubTransaction<Self::T>) -> R, R>(self, f: F) -> Self::Return<R>
+    where
+        Self: Sized,
+    {
+        let sub_xact = SubTransaction::new(self);
         f(sub_xact)
     }
 }
 
 impl<Parent> SubTransactionExt for SubTransaction<Parent> {
     type T = SubTransaction<Parent>;
-    fn sub_transaction<F: FnOnce(SubTransaction<Self::T>) -> R, R>(self, f: F) -> R
+    type Return<R> = R;
+    fn sub_transaction<F: FnOnce(SubTransaction<Self::T>) -> R, R>(self, f: F) -> Self::Return<R>
     where
         Self: Sized,
     {
         let sub_xact = SubTransaction::new(self);
+        f(sub_xact)
+    }
+}
+
+/// This reference to SpiClient is used only internally in this crate (`checked` module) where
+/// we know we're not going to leak the client clone.
+pub(crate) struct RetainedSpiClient(pub(crate) SpiClient);
+
+impl SubTransactionExt for RetainedSpiClient {
+    type T = Box<SpiClient>;
+    type Return<R> = R;
+    fn sub_transaction<F: FnOnce(SubTransaction<Self::T>) -> R, R>(self, f: F) -> Self::Return<R>
+    where
+        Self: Sized,
+    {
+        let sub_xact = SubTransaction::new(Box::new(self.0));
         f(sub_xact)
     }
 }
