@@ -13,7 +13,7 @@ msrv = "1.65"
 pgx = ">=0.6.0-alpha.1"
 
 [patch.crates-io]
-pgx = { git = "https://github.com/tcdi/pgx", rev = "7430ce1" }
+pgx = { git = "https://github.com/yrashk/pgx", rev = "a0e27e46" }
 
 [features]
 default = []

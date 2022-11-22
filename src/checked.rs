@@ -109,7 +109,8 @@ impl CheckedCommands for SpiClient {
         limit: Option<i64>,
         args: Option<Vec<(PgOid, Option<Datum>)>>,
     ) -> Result<Self::Result<SpiTupleTable>, CaughtError> {
-        self.sub_transaction(|xact| xact.checked_select(query, limit, args))
+        RetainedSpiClient(self.clone())
+            .sub_transaction(|xact| xact.checked_select(query, limit, args))
             .map(|(table, xact)| (table, *xact.commit()))
     }
 }
@@ -123,9 +124,7 @@ impl<'a> CheckedCommands for &'a SpiClient {
         limit: Option<i64>,
         args: Option<Vec<(PgOid, Option<Datum>)>>,
     ) -> Result<Self::Result<SpiTupleTable>, CaughtError> {
-        // Here we rely on the fact that `SpiClient` can be created at any time. This may not hold true in the future
-        // However, we need the client to be consumed by `sub_transaction`, so we do this for now.
-        SpiClient
+        RetainedSpiClient(self.clone())
             .sub_transaction(|xact| xact.checked_select(query, limit, args))
             .map(|(table, _xact): (_, SubTransaction<_, true>)| table)
     }
@@ -140,7 +139,8 @@ impl CheckedMutCommands for SpiClient {
         limit: Option<i64>,
         args: Option<Vec<(PgOid, Option<Datum>)>>,
     ) -> Result<Self::Result<SpiTupleTable>, CaughtError> {
-        self.sub_transaction(|xact| xact.checked_update(query, limit, args))
+        RetainedSpiClient(self.clone())
+            .sub_transaction(|xact| xact.checked_update(query, limit, args))
             .map(|(table, xact)| (table, *xact.commit()))
     }
 }
@@ -154,9 +154,7 @@ impl<'a> CheckedMutCommands for &'a mut SpiClient {
         limit: Option<i64>,
         args: Option<Vec<(PgOid, Option<Datum>)>>,
     ) -> Result<Self::Result<SpiTupleTable>, CaughtError> {
-        // Here we rely on the fact that `SpiClient` can be created at any time. This may not hold true in the future
-        // However, we need the client to be consumed by `sub_transaction`, so we do this for now.
-        SpiClient
+        RetainedSpiClient(self.clone())
             .sub_transaction(|xact| xact.checked_update(query, limit, args))
             .map(|(table, _xact): (_, SubTransaction<_, true>)| table)
     }
