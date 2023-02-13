@@ -5,40 +5,35 @@ pgx::pg_module_magic!();
 #[cfg(any(test, feature = "pg_test"))]
 #[pg_schema]
 mod tests {
-    use pgx::pg_sys::submodules::panic::CaughtError;
     use pgx::prelude::*;
-    use pgx_contrib_spiext::*;
+    use pgx::spi::SpiClient;
+    use pgx_contrib_spiext::prelude::*;
+    use pgx_contrib_spiext::subtxn::CommitOnDrop;
 
     #[pg_test]
-    fn test_sub_txn_1() {
-        use subtxn::*;
-        Spi::execute(|c| {
-            c.update("CREATE TABLE a (v INTEGER)", None, None);
-            c.sub_transaction(|xact| xact);
-        });
-    }
-
-    #[pg_test]
-    fn test_sub_txn() {
-        use subtxn::*;
-        Spi::execute(|c| {
-            c.update("CREATE TABLE a (v INTEGER)", None, None);
-            let c = c.sub_transaction(|xact| {
-                xact.update("INSERT INTO a VALUES (0)", None, None);
+    fn test_subxact_smoketest() {
+        Spi::connect(|mut c| {
+            c.update("CREATE TABLE a (v INTEGER)", None, None).unwrap();
+            let c = c.sub_transaction(|mut xact| {
+                xact.update("INSERT INTO a VALUES (0)", None, None).unwrap();
                 assert_eq!(
                     0,
                     xact.select("SELECT v FROM a", Some(1), None)
+                        .unwrap()
                         .first()
-                        .get_datum::<i32>(1)
+                        .get::<i64>(1)
+                        .unwrap()
                         .unwrap()
                 );
-                let xact = xact.sub_transaction(|xact| {
-                    xact.update("INSERT INTO a VALUES (1)", None, None);
+                let xact = xact.sub_transaction(|mut xact| {
+                    xact.update("INSERT INTO a VALUES (1)", None, None).unwrap();
                     assert_eq!(
                         2,
                         xact.select("SELECT COUNT(*) FROM a", Some(1), None)
+                            .unwrap()
                             .first()
-                            .get_datum::<i32>(1)
+                            .get::<i64>(1)
+                            .unwrap()
                             .unwrap()
                     );
                     xact.rollback()
@@ -48,119 +43,92 @@ mod tests {
             assert_eq!(
                 0,
                 c.select("SELECT COUNT(*) FROM a", Some(1), None)
+                    .unwrap()
                     .first()
-                    .get_datum::<i32>(1)
+                    .get::<i64>(1)
+                    .unwrap()
                     .unwrap()
             );
         })
     }
 
     #[pg_test]
-    fn test_subtxn_checked_execution_smoketest() {
-        use checked::*;
-        use subtxn::*;
-        Spi::execute(|c| {
-            c.update("CREATE TABLE a (v INTEGER)", None, None);
-            let (_, c) = c
-                .sub_transaction(|xact| xact.checked_update("INSERT INTO a VALUES (0)", None, None))
-                .unwrap();
-            drop(c);
-            // The above transaction will be committed, we check that by obtaining a new connection
-            // and querying the results
-
-            Spi::execute(|c| {
+    fn test_commit_on_drop() {
+        Spi::connect(|mut c| {
+            c.update("CREATE TABLE a (v INTEGER)", None, None).unwrap();
+            // The type below is explicit to ensure it's commit on drop by default
+            c.sub_transaction(|mut xact: SubTransaction<SpiClient, CommitOnDrop>| {
+                xact.update("INSERT INTO a VALUES (0)", None, None).unwrap();
+                // Dropped explicitly for illustration purposes
+                drop(xact);
+            });
+            // Create a new client to check the state
+            Spi::connect(|c| {
+                // The above insert should have been committed
                 assert_eq!(
                     1,
                     c.select("SELECT COUNT(*) FROM a", Some(1), None)
-                        .first()
-                        .get_datum::<i32>(1)
                         .unwrap()
-                );
-                let c = c.sub_transaction(|xact| {
-                    xact.update("INSERT INTO a VALUES (0)", None, None);
-                    xact.rollback()
-                });
-                // The above transaction will be rolled back (as explicitly requested)
-                assert_eq!(
-                    1,
-                    c.select("SELECT COUNT(*) FROM a", Some(1), None)
                         .first()
-                        .get_datum::<i32>(1)
+                        .get::<i64>(1)
+                        .unwrap()
                         .unwrap()
                 );
             });
-        });
+        })
     }
 
     #[pg_test]
-    fn test_catch_checked_select() {
-        use checked::*;
-        Spi::execute(|c| {
-            let _ = (&c).checked_select("SELECT 1", None, None).unwrap();
-            let (_, c) = c.checked_select("SELECT 1", None, None).unwrap();
-            let result = c.checked_select("SLECT 1", None, None);
-            assert!(matches!(
-                result,
-                Err(CaughtError::PostgresError(error)) if error.message() == "syntax error at or near \"SLECT\""
-            ));
-        });
+    fn test_rollback_on_drop() {
+        Spi::connect(|mut c| {
+            c.update("CREATE TABLE a (v INTEGER)", None, None).unwrap();
+            // The type below is explicit to ensure it's commit on drop by default
+            c.sub_transaction(|mut xact: SubTransaction<SpiClient, CommitOnDrop>| {
+                xact.update("INSERT INTO a VALUES (0)", None, None).unwrap();
+                let xact = xact.rollback_on_drop();
+                // Dropped explicitly for illustration purposes
+                drop(xact);
+            });
+            // Create a new client to check the state
+            Spi::connect(|c| {
+                // The above insert should NOT have been committed
+                assert_eq!(
+                    0,
+                    c.select("SELECT COUNT(*) FROM a", Some(1), None)
+                        .unwrap()
+                        .first()
+                        .get::<i64>(1)
+                        .unwrap()
+                        .unwrap()
+                );
+            });
+        })
     }
 
     #[pg_test]
-    fn test_catch_checked_update() {
-        use checked::*;
-        Spi::execute(|c| {
-            let txid = unsafe { pg_sys::GetCurrentSubTransactionId() };
-            let _ = (&c)
-                .checked_update("CREATE TABLE x ()", None, None)
-                .unwrap();
-            // Ensure we're no longer in the a sub-transaction created by `checked_update`
-            let txid_ = unsafe { pg_sys::GetCurrentSubTransactionId() };
-            assert!(txid == txid_);
-            assert!((&c)
-                .checked_select("SELECT count(*) FROM x", None, None)
-                .is_ok());
-            let (_, c) = c.checked_update("CREATE TABLE a ()", None, None).unwrap();
-            let result = c.checked_update("CREAT TABLE x()", None, None);
-            assert!(matches!(
-                result,
-                Err(CaughtError::PostgresError(error)) if error.message() == "syntax error at or near \"CREAT\""
-            ));
-        });
-    }
-
-    #[pg_test]
-    fn test_catch_checked_select_txn() {
-        use checked::*;
-        use subtxn::*;
-        Spi::execute(|c| {
+    fn test_checked_select() {
+        Spi::connect(|c| {
             c.sub_transaction(|xact| {
+                // Ensure xact is passed through
                 let (_, xact) = xact.checked_select("SELECT 1", None, None).unwrap();
-                let result = xact.checked_select("SLECT 1", None, None);
-                assert!(matches!(
-                    result,
-                    Err(CaughtError::PostgresError(error)) if error.message() == "syntax error at or near \"SLECT\""
-                ));
+                let result = xact.checked_select("SLECT", None, None);
+                assert!(matches!(result, Err(CheckedError::CaughtError(CaughtError::PostgresError(error))) if error.message() == "syntax error at or near \"SLECT\""));
             });
-        });
+            Ok::<_, spi::Error>(())
+        }).unwrap();
     }
 
     #[pg_test]
-    fn test_catch_checked_update_txn() {
-        use checked::*;
-        use subtxn::*;
-        Spi::execute(|c| {
+    fn test_checked_update() {
+        Spi::connect(|c| {
             c.sub_transaction(|xact| {
-                let (_, xact) = xact
-                    .checked_update("CREATE TABLE a ()", None, None)
-                    .unwrap();
-                let result = xact.checked_update("INSER INTO a VALUES ()", None, None);
-                assert!(matches!(
-                    result,
-                    Err(CaughtError::PostgresError(error)) if error.message() == "syntax error at or near \"INSER\""
-                ));
+                // Ensure xact is passed through
+                let (_, xact) = xact.checked_update("CREATE TABLE q ()", None, None).unwrap();
+                let result = xact.checked_update("DLETE", None, None);
+                assert!(matches!(result, Err(CheckedError::CaughtError(CaughtError::PostgresError(error))) if error.message() == "syntax error at or near \"DLETE\""));
             });
-        });
+            Ok::<_, spi::Error>(())
+        }).unwrap();
     }
 }
 

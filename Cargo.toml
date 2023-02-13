@@ -10,7 +10,8 @@ msrv = "1.65"
 # See more keys and their definitions at https://doc.rust-lang.org/cargo/reference/manifest.html
 
 [dependencies]
-pgx = "0.6.1"
+pgx = "0.7.1"
+thiserror = "1.0.38"
 
 [features]
 default = []
